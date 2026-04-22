@@ -3,9 +3,8 @@
 __pycache__/
 *.pyc
 
-/data/raw/*
-/data/processed/*
-!/data/raw/.gitkeep
-!/data/processed/.gitkeep
-!/data/processed/feature_columns.json
-!/data/processed/preprocessing_metadata.json
+# Ignore large datasets (>100MB) due to GitHub limits
+/data/raw/Final_Augmented_dataset_Diseases_and_Symptoms.csv
+/data/processed/fair_X_train.csv
+/data/processed/X_train_features.csv
+/data/processed/X_train_final.csv
