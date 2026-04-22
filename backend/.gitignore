@@ -1,0 +1,11 @@
+/reports/
+*.log
+__pycache__/
+*.pyc
+
+/data/raw/*
+/data/processed/*
+!/data/raw/.gitkeep
+!/data/processed/.gitkeep
+!/data/processed/feature_columns.json
+!/data/processed/preprocessing_metadata.json
