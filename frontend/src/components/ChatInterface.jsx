@@ -28,19 +28,34 @@ export default function ChatInterface({ onResults }) {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  const callPredictAPI = async (symptoms) => {
+  const callPredictAPI = async (symptoms, message = null) => {
     try {
+      const payload = {
+        age,
+        gender,
+        asked_symptoms: Array.from(askedSymptoms)
+      };
+      
+      if (message) {
+        payload.message = message;
+      } else {
+        payload.symptoms = symptoms;
+      }
+
       const res = await fetch('http://localhost:8000/predict', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symptoms,
-          age,
-          gender,
-          asked_symptoms: Array.from(askedSymptoms)
-        })
+        body: JSON.stringify(payload)
       });
-      if (!res.ok) throw new Error('Prediction failed');
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        const error = new Error(errorData.detail || 'Prediction failed');
+        error.status = res.status;
+        error.detail = errorData.detail;
+        throw error;
+      }
+
       return await res.json();
     } catch (err) {
       console.error('API error:', err);
@@ -48,19 +63,34 @@ export default function ChatInterface({ onResults }) {
     }
   };
 
-  const callFollowupAPI = async (symptoms, newAnswer) => {
+  const callFollowupAPI = async (symptoms, newAnswer, message = null) => {
     try {
+      const payload = {
+        new_answer: newAnswer,
+        age,
+        gender
+      };
+
+      if (message) {
+        payload.message = message;
+      } else {
+        payload.symptoms = symptoms;
+      }
+
       const res = await fetch('http://localhost:8000/followup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symptoms,
-          new_answer: newAnswer,
-          age,
-          gender
-        })
+        body: JSON.stringify(payload)
       });
-      if (!res.ok) throw new Error('Followup failed');
+
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        const error = new Error(errorData.detail || 'Followup failed');
+        error.status = res.status;
+        error.detail = errorData.detail;
+        throw error;
+      }
+
       return await res.json();
     } catch (err) {
       console.error('API error:', err);
@@ -110,12 +140,29 @@ export default function ChatInterface({ onResults }) {
           return;
         }
 
+        let data;
+        try {
+          // Try with parsed symptoms first
+          data = await callPredictAPI(parsedSymptoms);
+        } catch (err) {
+          // If 422 error (symptoms not recognized), retry with message format
+          if (err.status === 422) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: 'assistant',
+                text: 'I had trouble understanding those symptoms. Please describe them in more detail, like "I have a fever and cough" or "feeling tired with a headache".'
+              }
+            ]);
+            setIsLoading(false);
+            return;
+          }
+          throw err;
+        }
+
         setConfirmedSymptoms(parsedSymptoms);
         const newAskedSymptoms = new Set(parsedSymptoms);
         setAskedSymptoms(newAskedSymptoms);
-
-        // Call predict API
-        const data = await callPredictAPI(parsedSymptoms);
         setPredictions(data);
 
         if (data.next_question) {
@@ -192,13 +239,25 @@ export default function ChatInterface({ onResults }) {
       }
     } catch (err) {
       console.error('Error:', err);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          text: 'Sorry, I encountered an error. Please try again.'
-        }
-      ]);
+      
+      // Handle 422 errors specifically
+      if (err.status === 422) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            text: 'I couldn\'t recognize those symptoms. Please describe them like:\n• "I have a fever and cough"\n• "I\'m experiencing fatigue and headache"\n• "feeling tired, dizzy, and nauseous"'
+          }
+        ]);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            text: 'Sorry, I encountered an error. Please try again.'
+          }
+        ]);
+      }
     } finally {
       setIsLoading(false);
       scrollToBottom();

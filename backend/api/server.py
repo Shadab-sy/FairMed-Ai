@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional
 import sys
 import difflib
 import json
@@ -26,14 +27,16 @@ from predict import predict_disease, build_model
 
 # ── Request/Response Models ───────────────────────────────────────────────────
 class PredictRequest(BaseModel):
-    symptoms: list[str]
+    symptoms: Optional[list[str]] = None
+    message: Optional[str] = None
     asked_symptoms: list[str] = []
     age: int = 30
     gender: str = "male"
 
 
 class FollowupRequest(BaseModel):
-    symptoms: list[str]
+    symptoms: Optional[list[str]] = None
+    message: Optional[str] = None
     new_answer: dict  # e.g. {"chest_pain": 1}
     age: int = 30
     gender: str = "male"
@@ -132,6 +135,193 @@ def load_env_file() -> None:
 
 def normalize_symptom(symptom: str) -> str:
     return symptom.lower().strip().replace(" ", "_").replace("-", "_")
+
+
+def extract_symptoms_from_text(message: str, use_gemini_fallback: bool = True) -> list[str]:
+    """
+    Extract symptom keywords from free-text input using multi-strategy matching.
+    Strategies: direct substring, synonym mapping, fuzzy matching, + optional Gemini fallback.
+    
+    Example:
+        Input: "i feel very tired and have headache"
+        Output: ["fatigue", "headache"]
+    
+    Args:
+        message: User's free-text input
+        use_gemini_fallback: If True and local strategies find no symptoms, use Gemini API
+    """
+    if not message:
+        return []
+    
+    text_lower = message.lower()
+    extracted = set()
+    
+    # Get all known symptoms
+    known_symptoms = set(SYMPTOM_QUESTION_MAP.keys())
+    
+    # ── Strategy 1: Direct substring matching ──
+    for symptom in known_symptoms:
+        # Try space-separated version (e.g., "chest pain" for "chest_pain")
+        symptom_str = symptom.replace("_", " ")
+        if symptom_str in text_lower:
+            extracted.add(symptom)
+            continue
+        
+        # Try underscore version
+        if symptom in text_lower:
+            extracted.add(symptom)
+    
+    # ── Strategy 2: Synonym/abbreviation mapping ──
+    # Common user phrases that map to known symptoms
+    synonyms = {
+        "tired": "fatigue",
+        "tiredness": "fatigue",
+        "exhausted": "fatigue",
+        "weak": "fatigue",
+        "weakness": "fatigue",
+        "runny nose": "nasal_discharge",
+        "stuffy nose": "nasal_discharge",
+        "congestion": "nasal_discharge",
+        "stomach pain": "abdominal_pain",
+        "stomach ache": "abdominal_pain",
+        "belly pain": "abdominal_pain",
+        "throwing up": "vomiting",
+        "throwing up": "vomiting",
+        "sick": "nausea",
+        "nauseous": "nausea",
+        "dizzy": "dizziness",
+        "light headed": "dizziness",
+        "lightheaded": "dizziness",
+        "sore throat": "throat_soreness",
+        "scratchy throat": "throat_soreness",
+        "difficulty sleeping": "insomnia",
+        "can't sleep": "insomnia",
+        "trouble sleeping": "insomnia",
+        "sleepless": "insomnia",
+        "chest discomfort": "burning_chest_pain",
+        "chest pressure": "burning_chest_pain",
+    }
+    
+    for phrase, symptom_key in synonyms.items():
+        if phrase in text_lower and symptom_key in known_symptoms:
+            extracted.add(symptom_key)
+    
+    # ── Strategy 3: Fuzzy matching on individual words ──
+    # Extract meaningful words (longer than 2 chars, excluding common words)
+    common_words = {"the", "and", "or", "i", "me", "my", "have", "has", "am", "is", "are", "feel", "feeling", "been", "very", "so", "too", "from", "with"}
+    words = text_lower.replace(",", " ").replace("and", " ").split()
+    
+    for word in words:
+        word = word.strip()
+        # Skip very short or common words
+        if len(word) <= 2 or word in common_words:
+            continue
+        
+        # Skip if already matched directly
+        if word in extracted:
+            continue
+        
+        # Find close matches using fuzzy matching
+        close_matches = difflib.get_close_matches(word, known_symptoms, n=1, cutoff=0.65)
+        if close_matches:
+            extracted.add(close_matches[0])
+    
+    # ── Strategy 4: Gemini API fallback (if enabled and no symptoms found) ──
+    if not extracted and use_gemini_fallback:
+        gemini_symptoms = generate_gemini_symptom_extraction(message)
+        extracted.update(gemini_symptoms)
+    
+    # Return deduplicated, sorted list
+    return sorted(list(extracted)) if extracted else []
+
+
+def generate_gemini_symptom_extraction(message: str) -> list[str]:
+    """
+    Use Gemini API to extract medical symptoms from free-text user input.
+    Validates extracted symptoms against known symptom list.
+    
+    Args:
+        message: User's free-text symptom description
+        
+    Returns:
+        List of normalized symptom keys that match SYMPTOM_QUESTION_MAP
+        
+    Example:
+        Input: "I have fever and slight chest pain"
+        Output: ["fever", "burning_chest_pain"]
+    """
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return []
+    
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    
+    known_symptoms = list(SYMPTOM_QUESTION_MAP.keys())
+    
+    prompt = {
+        "user_input": message,
+        "known_symptoms": known_symptoms,
+        "task": (
+            "Extract ONLY medical symptoms from this user input.\n\n"
+            "Return a JSON array with symptom keys from the known_symptoms list.\n"
+            "If a symptom is mentioned in a different way, find the closest match from known_symptoms.\n"
+            "Do NOT include extra text or explanations.\n"
+            "Return ONLY valid JSON array.\n\n"
+            f"Known symptoms: {', '.join(known_symptoms)}\n\n"
+            f"User input: \"{message}\"\n\n"
+            "Return format: [\"symptom1\", \"symptom2\"]"
+        ),
+        "schema": ["string"],
+    }
+    
+    payload = json.dumps({
+        "contents": [{"role": "user", "parts": [{"text": prompt['task']}]}],
+        "generationConfig": {
+            "response_mime_type": "application/json",
+            "temperature": 0.1,
+            "maxOutputTokens": 256,
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    }).encode("utf-8")
+    
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        
+        # Parse JSON response
+        try:
+            symptoms = json.loads(text)
+        except json.JSONDecodeError:
+            # Try to extract JSON array from text
+            import re
+            match = re.search(r'\[.*\]', text, re.DOTALL)
+            if match:
+                symptoms = json.loads(match.group())
+            else:
+                return []
+        
+        # Validate that returned symptoms are in known list
+        if isinstance(symptoms, list):
+            valid_symptoms = [
+                normalize_symptom(s) for s in symptoms
+                if normalize_symptom(s) in known_symptoms
+            ]
+            return sorted(list(set(valid_symptoms)))
+    
+    except (KeyError, json.JSONDecodeError, TimeoutError, urllib.error.URLError):
+        return []
+    
+    return []
 
 
 def question_symptom(question: str) -> str | None:
@@ -419,9 +609,12 @@ async def predict(request: PredictRequest):
     Predict diseases from symptoms.
 
     Request:
-        symptoms: List of symptom strings
+        symptoms: List of symptom strings (optional)
+        message: Free-text symptom description (optional)
         age: Patient age (default 30)
         gender: 'male' or 'female' (default 'male')
+        
+    Note: Provide either 'symptoms' list OR 'message', not both.
 
     Response:
         top_predictions: List of top-3 disease predictions with confidence
@@ -429,9 +622,19 @@ async def predict(request: PredictRequest):
         next_question: Follow-up question to refine prediction, or None
     """
 
-    # Validate input
-    if not request.symptoms or len(request.symptoms) == 0:
-        raise HTTPException(status_code=400, detail="No symptoms provided")
+    # Validate input - accept either symptoms list or free text message
+    symptoms_list = request.symptoms or []
+    
+    # If no symptoms but message provided, extract from text
+    if not symptoms_list and request.message:
+        symptoms_list = extract_symptoms_from_text(request.message)
+    
+    # Must have at least one symptom
+    if not symptoms_list or len(symptoms_list) == 0:
+        raise HTTPException(
+            status_code=400, 
+            detail="No symptoms provided. Send either 'symptoms' list or 'message' with symptom description."
+        )
 
     try:
         # Get artifacts from app state
@@ -439,7 +642,7 @@ async def predict(request: PredictRequest):
 
         # Call predict_disease
         predictions = predict_disease(
-            symptoms=request.symptoms,
+            symptoms=symptoms_list,
             age=request.age,
             gender=request.gender,
             model=artifacts["model"],
@@ -470,11 +673,11 @@ async def predict(request: PredictRequest):
 
         # Generate next question based on top predictions
         predicted_disease_names = [p["disease"] for p in predictions]
-        already_asked = set(request.symptoms) | set(request.asked_symptoms)
+        already_asked = set(symptoms_list) | set(request.asked_symptoms)
         fallback_question = select_next_question(predicted_disease_names, already_asked)
         fallback_symptom = question_symptom(fallback_question) if fallback_question else None
         gemini_question, gemini_symptom = generate_gemini_followup(
-            request.symptoms,
+            symptoms_list,
             already_asked,
             predictions,
             fallback_question,
@@ -482,7 +685,7 @@ async def predict(request: PredictRequest):
         next_question = gemini_question or fallback_question
         next_symptom = gemini_symptom or fallback_symptom
         explanation, explanation_factors = explain_prediction(
-            request.symptoms,
+            symptoms_list,
             request.age,
             request.gender,
             artifacts,
@@ -511,22 +714,35 @@ async def followup(request: FollowupRequest):
     Get updated predictions based on follow-up answer.
 
     Request:
-        symptoms: Original list of symptom strings
+        symptoms: Original list of symptom strings (optional)
+        message: Free-text symptom description (optional)
         new_answer: Dict with newly confirmed symptom (e.g. {"chest_pain": 1})
         age: Patient age
         gender: Patient gender
+        
+    Note: Provide either 'symptoms' list OR 'message', not both.
 
     Response:
         Updated predictions with confidence and next question
     """
 
-    # Validate input
-    if not request.symptoms or len(request.symptoms) == 0:
-        raise HTTPException(status_code=400, detail="No symptoms provided")
+    # Validate input - accept either symptoms list or free text message
+    symptoms_list = request.symptoms or []
+    
+    # If no symptoms but message provided, extract from text
+    if not symptoms_list and request.message:
+        symptoms_list = extract_symptoms_from_text(request.message)
+    
+    # Must have at least one symptom
+    if not symptoms_list or len(symptoms_list) == 0:
+        raise HTTPException(
+            status_code=400, 
+            detail="No symptoms provided. Send either 'symptoms' list or 'message' with symptom description."
+        )
 
     try:
         # Add new symptom to the list
-        new_symptoms = list(request.symptoms)
+        new_symptoms = list(symptoms_list)
         
         # Extract the symptom name from new_answer
         # new_answer format: {"symptom_name": 1}
@@ -571,7 +787,7 @@ async def followup(request: FollowupRequest):
 
         # Generate next question (avoid previous symptoms)
         predicted_disease_names = [p["disease"] for p in predictions]
-        already_asked = set(request.symptoms) | set(request.new_answer.keys())
+        already_asked = set(symptoms_list) | set(request.new_answer.keys())
         fallback_question = select_next_question(predicted_disease_names, already_asked)
         fallback_symptom = question_symptom(fallback_question) if fallback_question else None
         gemini_question, gemini_symptom = generate_gemini_followup(
