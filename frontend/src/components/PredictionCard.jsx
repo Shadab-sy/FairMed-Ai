@@ -1,41 +1,58 @@
-import React from 'react';
-import { ActivitySquare, AlertCircle } from 'lucide-react';
+import { useEffect, useState } from 'react';
 
-const PredictionCard = ({ disease, confidence, severity }) => {
-  return (
-    <div className="glass-panel p-6 animate-fade-in relative overflow-hidden">
-      <div className="absolute top-0 left-0 w-1 h-full bg-primary"></div>
-      
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-1">Top Prediction</h3>
-          <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
-            {disease}
-            {severity === 'high' && <AlertCircle className="text-warning h-5 w-5" />}
-          </h2>
+export default function PredictionCard({ disease, confidence, rank = 1 }) {
+  const [fillWidth, setFillWidth] = useState(0);
+
+  useEffect(() => {
+    // Animate the confidence bar on mount
+    setTimeout(() => setFillWidth(confidence), 100);
+  }, [confidence]);
+
+  if (rank === 1) {
+    return (
+      <div className="bg-white rounded-2xl shadow-soft-lg p-8 border-l-4 border-indigo-600">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-3xl font-bold text-slate-900">{disease}</h3>
+          <span className="px-3 py-1 bg-indigo-100 text-indigo-700 text-xs font-bold rounded-full">
+            Top Match
+          </span>
         </div>
-        <div className="bg-primary/10 text-primary p-3 rounded-full">
-          <ActivitySquare size={24} />
-        </div>
-      </div>
-      
-      <div>
-        <div className="flex justify-between items-end mb-2">
-          <span className="text-sm font-medium text-slate-600">Model Confidence</span>
-          <span className="text-xl font-bold text-slate-800">{confidence}%</span>
-        </div>
-        <div className="w-full bg-slate-100 rounded-full h-3 mb-2 overflow-hidden shadow-inner">
-          <div 
-            className="bg-primary h-3 rounded-full transition-all duration-1000 ease-out relative"
-            style={{ width: `${confidence}%` }}
-          >
-            <div className="absolute top-0 right-0 bottom-0 left-0 bg-white/20 animate-[pulse_2s_ease-in-out_infinite]"></div>
+
+        <div className="mb-6">
+          <div className="flex items-end gap-2 mb-3">
+            <span className="text-5xl font-bold text-indigo-600">{confidence}%</span>
+            {confidence > 60 && (
+              <span className="text-sm text-amber-600 font-semibold mb-1">High Confidence</span>
+            )}
+          </div>
+
+          <div className="w-full bg-slate-200 rounded-full h-3 overflow-hidden">
+            <div
+              className="bg-indigo-600 h-full rounded-full transition-all duration-1000 ease-out"
+              style={{ width: `${fillWidth}%` }}
+            />
           </div>
         </div>
-        <p className="text-xs text-slate-400">Based on analysis of 1M+ clinical records.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-xl shadow-soft p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex-1">
+          <p className="font-semibold text-slate-900 text-sm">{disease}</p>
+          <p className="text-2xl font-bold text-slate-700 mt-2">{confidence}%</p>
+        </div>
+        <span className="text-2xl text-slate-400">{rank}</span>
+      </div>
+
+      <div className="mt-3 w-full bg-slate-200 rounded-full h-2 overflow-hidden">
+        <div
+          className="bg-indigo-400 h-full rounded-full transition-all duration-1000 ease-out"
+          style={{ width: `${fillWidth}%` }}
+        />
       </div>
     </div>
   );
-};
-
-export default PredictionCard;
+}

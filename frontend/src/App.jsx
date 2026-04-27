@@ -1,97 +1,116 @@
-import React, { useState } from 'react';
+import { useState, useCallback, useEffect } from 'react';
+import './App.css';
 import Navbar from './components/Navbar';
-import Landing from './components/Landing';
-import Dashboard from './components/Dashboard';
-import HistoryPanel from './components/HistoryPanel';
+import Sidebar from './components/Sidebar';
+import ChatInterface from './components/ChatInterface';
+import ResultsPanel from './components/ResultsPanel';
 
-function App() {
-  const [view, setView] = useState('landing');
-  const [query, setQuery] = useState('');
-  const [isProcessing, setIsProcessing] = useState(false);
+export default function App() {
+  const [currentResults, setCurrentResults] = useState(null);
+  const [currentSymptoms, setCurrentSymptoms] = useState([]);
+  const [patientAge, setPatientAge] = useState(30);
+  const [patientGender, setPatientGender] = useState('male');
+  const [history, setHistory] = useState([]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  
-  // Dummy history data
-  const [history, setHistory] = useState([
-    { id: 1, query: 'Persistent headache and blurred vision', date: 'Today, 2:30 PM' },
-    { id: 2, query: 'Skin rash after taking pain medication', date: 'Yesterday, 9:15 AM' }
-  ]);
 
-  const handleSearch = (searchQuery) => {
-    setIsProcessing(true);
-    // Simulate AI processing delay for UX
-    setTimeout(() => {
-      setQuery(searchQuery);
-      setIsProcessing(false);
-      setView('dashboard');
-      
-      // Add current search to history if not exists
-      const exists = history.find(item => item.query.toLowerCase() === searchQuery.toLowerCase());
-      if (!exists) {
-        setHistory(prev => [
-          { id: Date.now(), query: searchQuery, date: 'Just now' },
-          ...prev
-        ]);
-      }
-    }, 1500);
-  };
-
-  const handleBack = () => {
-    setView('landing');
-    setQuery('');
-  };
-
-  const toggleSidebar = () => {
-    setIsSidebarOpen(prev => !prev);
-  };
-
-  const handleSelectHistory = (selectedQuery) => {
-    setQuery(selectedQuery);
-    setView('dashboard');
-    if (window.innerWidth < 768) {
-      setIsSidebarOpen(false); // Auto close sidebar on mobile
+  // Auto-close sidebar on mobile when results appear
+  useEffect(() => {
+    if (window.innerWidth < 768 && currentResults) {
+      setIsSidebarOpen(false);
     }
-  };
+  }, [currentResults]);
 
-  const handleNewSearch = () => {
-    setView('landing');
-    setQuery('');
+  const handleStartNewCheck = useCallback(() => {
+    setCurrentResults(null);
+    setCurrentSymptoms([]);
+    setPatientAge(30);
+    setPatientGender('male');
+    // Keep sidebar closed by default
+    setIsSidebarOpen(false);
+  }, []);
+
+  const handleSaveToHistory = useCallback(() => {
+    if (currentResults && currentSymptoms.length > 0) {
+      const newEntry = {
+        id: Date.now(),
+        query: currentSymptoms.join(', '),
+        date: new Date().toLocaleDateString('en-US', {
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
+        }),
+        results: currentResults,
+        insights: null,
+        symptoms: currentSymptoms,
+        age: patientAge,
+        gender: patientGender
+      };
+      setHistory([newEntry, ...history]);
+    }
+  }, [currentResults, currentSymptoms, patientAge, patientGender, history]);
+
+  const handleHistoryClick = useCallback((entry) => {
+    setCurrentResults(entry.results);
+    setCurrentSymptoms(entry.symptoms);
+    setPatientAge(entry.age);
+    setPatientGender(entry.gender);
+    // Close sidebar on mobile when selection made
     if (window.innerWidth < 768) {
       setIsSidebarOpen(false);
     }
-  };
+  }, []);
+
+  const handleChatResults = useCallback((results, symptoms, age, gender) => {
+    setCurrentResults(results);
+    setCurrentSymptoms(symptoms);
+    setPatientAge(age);
+    setPatientGender(gender);
+  }, []);
+
+  const toggleSidebar = useCallback(() => {
+    setIsSidebarOpen((prev) => {
+      console.log("Sidebar toggle:", !prev);
+      return !prev;
+    });
+  }, []);
 
   return (
-    <div className="app-container relative flex overflow-x-hidden">
-      <HistoryPanel 
-        isOpen={isSidebarOpen} 
-        onClose={() => setIsSidebarOpen(false)}
-        history={history}
-        onSelectHistory={handleSelectHistory}
-        onNewSearch={handleNewSearch}
-      />
-      
-      {/* Spacer when sidebar is open on desktop */}
-      <div 
-        className={`hidden md:block transition-all duration-300 ${isSidebarOpen ? 'w-72 shrink-0' : 'w-0 shrink-0'}`} 
-      />
+    <div className="min-h-screen bg-slate-50 flex flex-col">
+      {/* Navigation Bar */}
+      <Navbar onMenuClick={toggleSidebar} />
 
-      <div className="flex-1 flex flex-col min-h-screen transition-all duration-300 w-full relative">
-        <Navbar onToggleSidebar={toggleSidebar} />
-        
-        <main className="flex-1 w-full flex flex-col">
-          {view === 'landing' ? (
-            <Landing onSearch={handleSearch} isProcessing={isProcessing} />
+      {/* Main Content Area */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Sidebar - Toggleable */}
+        <Sidebar
+          history={history}
+          onHistoryClick={handleHistoryClick}
+          isSidebarOpen={isSidebarOpen}
+          onClose={() => {
+            if (window.innerWidth < 768) {
+              setIsSidebarOpen(false);
+            }
+          }}
+        />
+
+        {/* Main Chat Area */}
+        <main className="flex-1">
+          {!currentResults ? (
+            <ChatInterface onResults={handleChatResults} />
           ) : (
-            <Dashboard query={query} onBack={handleBack} />
+            <ResultsPanel
+              predictions={currentResults}
+              insights={null}
+              symptoms={currentSymptoms}
+              age={patientAge}
+              gender={patientGender}
+              onStartNew={handleStartNewCheck}
+              onSaveToHistory={handleSaveToHistory}
+            />
           )}
         </main>
       </div>
-
-      {/* Background Decorative Blur Ellipses */}
-      <div className="fixed top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary/20 blur-[120px] rounded-full pointer-events-none -z-10" />
-      <div className="fixed bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-emerald-500/10 blur-[120px] rounded-full pointer-events-none -z-10" />
     </div>
   );
 }
-
-export default App;

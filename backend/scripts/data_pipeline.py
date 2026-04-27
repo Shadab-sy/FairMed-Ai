@@ -17,7 +17,7 @@ def clean_general_data(file_path):
     df = clean_column_names(df)
     
     # Strip whitespace from string columns
-    str_cols = df.select_dtypes(include=['object']).columns
+    str_cols = df.select_dtypes(include=['object', 'string']).columns
     for col in str_cols:
         df[col] = df[col].astype(str).str.strip().str.lower()
         
@@ -167,6 +167,9 @@ def main():
     PROCESSED_DIR = os.path.join(DATA_DIR, "processed")
     REPORTS_DIR = os.path.join(BASE_DIR, "reports")
     
+    os.makedirs(PROCESSED_DIR, exist_ok=True)
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+    
     # Process metadata
     process_clinical_metadata(RAW_DIR, PROCESSED_DIR)
     
@@ -193,7 +196,8 @@ def main():
     
     # Ensure binary
     for col in all_features:
-        aug_symptoms[col] = aug_symptoms[col].apply(lambda x: 1 if float(x) > 0 else 0)
+        aug_symptoms[col] = pd.to_numeric(aug_symptoms[col], errors='coerce').fillna(0)
+        aug_symptoms[col] = (aug_symptoms[col] > 0).astype(int)
         
     # Fit Label Encoder
     le = LabelEncoder()
