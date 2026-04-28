@@ -8,8 +8,9 @@ import ResultsPanel from './components/ResultsPanel';
 export default function App() {
   const [currentResults, setCurrentResults] = useState(null);
   const [currentSymptoms, setCurrentSymptoms] = useState([]);
-  const [patientAge, setPatientAge] = useState(30);
-  const [patientGender, setPatientGender] = useState('male');
+  const [patientAge, setPatientAge] = useState(null);
+  const [patientGender, setPatientGender] = useState(null);
+  const [isAssessmentLive, setIsAssessmentLive] = useState(false);
   const [history, setHistory] = useState([]);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
@@ -23,9 +24,9 @@ export default function App() {
   const handleStartNewCheck = useCallback(() => {
     setCurrentResults(null);
     setCurrentSymptoms([]);
-    setPatientAge(30);
-    setPatientGender('male');
-    // Keep sidebar closed by default
+    setPatientAge(null);
+    setPatientGender(null);
+    setIsAssessmentLive(false);
     setIsSidebarOpen(false);
   }, []);
 
@@ -61,11 +62,16 @@ export default function App() {
     }
   }, []);
 
-  const handleChatResults = useCallback((results, symptoms, age, gender) => {
-    setCurrentResults(results);
-    setCurrentSymptoms(symptoms);
+  const handleChatResults = useCallback((data, symptoms, age, gender) => {
+    const formatted = (data.top_predictions || []).map(p => ({
+      disease: p.disease,
+      confidence: Math.round(p.confidence),
+    }));
+    setCurrentResults(formatted);
+    setCurrentSymptoms(symptoms || []);
     setPatientAge(age);
     setPatientGender(gender);
+    setIsAssessmentLive(!!data.next_question);
   }, []);
 
   const toggleSidebar = useCallback(() => {
@@ -77,39 +83,49 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
-      {/* Navigation Bar */}
       <Navbar onMenuClick={toggleSidebar} />
 
-      {/* Main Content Area */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Sidebar - Toggleable */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* Sidebar */}
         <Sidebar
           history={history}
           onHistoryClick={handleHistoryClick}
           isSidebarOpen={isSidebarOpen}
-          onClose={() => {
-            if (window.innerWidth < 768) {
-              setIsSidebarOpen(false);
-            }
-          }}
+          onClose={() => setIsSidebarOpen(false)}
         />
 
-        {/* Main Chat Area */}
-        <main className="flex-1">
-          {!currentResults ? (
-            <ChatInterface onResults={handleChatResults} />
-          ) : (
-            <ResultsPanel
-              predictions={currentResults}
-              insights={null}
-              symptoms={currentSymptoms}
-              age={patientAge}
-              gender={patientGender}
-              onStartNew={handleStartNewCheck}
-              onSaveToHistory={handleSaveToHistory}
-            />
-          )}
-        </main>
+        {/* Page body */}
+        <div className="page-scroll">
+          <div className={`app-body ${currentResults ? 'has-results' : 'no-results'}`}>
+
+            {/* Chat column */}
+            <div className="chat-col">
+              <ChatInterface
+                onResults={handleChatResults}
+                onStartNew={handleStartNewCheck}
+              />
+            </div>
+
+            {/* Results column — only rendered once we have predictions */}
+            {currentResults && (
+              <div className="results-col">
+                <div className="results-sticky">
+                  <ResultsPanel
+                    predictions={currentResults}
+                    insights={null}
+                    symptoms={currentSymptoms}
+                    age={patientAge}
+                    gender={patientGender}
+                    isLive={isAssessmentLive}
+                    onStartNew={handleStartNewCheck}
+                    onSaveToHistory={handleSaveToHistory}
+                  />
+                </div>
+              </div>
+            )}
+
+          </div>
+        </div>
       </div>
     </div>
   );

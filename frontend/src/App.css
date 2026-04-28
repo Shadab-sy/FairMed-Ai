@@ -1,12 +1,4 @@
-/* Global styles and custom Tailwind classes */
-
-:root {
-  --primary: #6366f1;
-  --accent: #10b981;
-  --background: #f8fafc;
-  --sidebar-width: 288px;
-}
-
+/* ── Reset ───────────────────────────────────────────────────────────────── */
 html, body, #root {
   margin: 0;
   padding: 0;
@@ -14,192 +6,215 @@ html, body, #root {
   height: 100%;
 }
 
-/* App layout - flex container for navbar and main content */
-#root > div {
+#root {
   display: flex;
   flex-direction: column;
-  height: 100vh;
-  overflow: hidden;
+  min-height: 100vh;
 }
 
-/* Main content area with sidebar and chat */
-#root > div > div {
-  display: flex;
+/* ── Outer scroll container ──────────────────────────────────────────────── */
+.page-scroll {
   flex: 1;
-  overflow: hidden;
-  height: 100%;
+  overflow-y: auto;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
 }
 
-/* Sidebar smooth toggle - CRITICAL FIX */
+/* ── Centred layout wrapper ──────────────────────────────────────────────── */
+.app-body {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 24px;
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 28px 24px;
+  box-sizing: border-box;
+  flex: 1; /* stretch to fill page-scroll height */
+}
+
+/* No-results: centre the single chat column both horizontally and vertically */
+.app-body.no-results {
+  justify-content: center;
+  align-items: center;
+}
+
+/* ── Chat column ─────────────────────────────────────────────────────────── */
+.chat-col {
+  flex: 1;
+  max-width: 580px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 64px - 56px); /* viewport − navbar − vertical padding */
+  background: #ffffff;
+  border-radius: 18px;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+  overflow: hidden;
+}
+
+/* When results are visible, cap chat width so both panels share space evenly */
+.app-body.has-results {
+  align-items: flex-start;
+}
+
+.app-body.has-results .chat-col {
+  flex: 0 0 480px;
+}
+
+/* ── Results column ──────────────────────────────────────────────────────── */
+.results-col {
+  flex: 1;
+  min-width: 320px;
+  max-width: 480px;
+}
+
+.results-sticky {
+  position: sticky;
+  top: 28px;
+  max-height: calc(100vh - 64px - 56px);
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+/* ── Chat message layout ─────────────────────────────────────────────────── */
+
+/* Scroll container — owns its own flex column so msg-rows get full width */
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  gap: 6px;          /* consistent spacing — no Tailwind space-y needed */
+}
+
+/* Each row spans full width; flex decides which side the bubble sits on */
+.msg-row {
+  display: flex;
+  width: 100%;
+  align-items: flex-end;
+}
+
+.msg-row.user { justify-content: flex-end; }
+.msg-row.bot  { justify-content: flex-start; }
+
+/* Bubble shrinks to its content, capped at 72% */
+.chat-bubble {
+  max-width: 72%;
+  width: fit-content;
+  padding: 10px 14px;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  word-break: break-word;
+  white-space: pre-wrap;
+  border-radius: 18px;
+}
+
+/* User — indigo gradient, tail bottom-right */
+.msg-row.user .chat-bubble {
+  background: linear-gradient(135deg, #6366f1, #4f46e5);
+  color: #ffffff;
+  border-bottom-right-radius: 4px;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.25);
+}
+
+/* Bot — white card, tail bottom-left */
+.msg-row.bot .chat-bubble {
+  background: #ffffff;
+  color: #1e293b;
+  border: 1px solid #e2e8f0;
+  border-bottom-left-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+
+/* Loading bubble */
+.msg-row.bot .chat-bubble.loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #94a3b8;
+}
+
+/* ── Responsive: stack below 860px ──────────────────────────────────────── */
+@media (max-width: 860px) {
+  .app-body,
+  .app-body.no-results,
+  .app-body.has-results {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 16px;
+    gap: 16px;
+  }
+
+  .chat-col,
+  .app-body.has-results .chat-col {
+    flex: none;
+    max-width: 100%;
+    width: 100%;
+    height: 55vh;
+  }
+
+  .results-col {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .results-sticky {
+    position: static;
+    max-height: none;
+    overflow-y: visible;
+  }
+}
+
+/* ── Sidebar smooth toggle ───────────────────────────────────────────────── */
 aside {
   transition: transform 0.3s ease-out;
   overflow-y: auto;
   overflow-x: hidden;
-  backface-visibility: hidden; /* Smooth GPU acceleration */
-  will-change: transform; /* GPU acceleration hint */
+  will-change: transform;
 }
 
-/* When closed: slide completely out of view */
-aside.closed,
-aside.-translate-x-full {
-  transform: translateX(-100%);
-}
-
-/* When open: slide back into view */
-aside.open,
-aside.translate-x-0 {
-  transform: translateX(0);
-}
-
-/* Desktop: sidebar always visible (remove toggle on md+) */
 @media (min-width: 768px) {
   aside {
     position: relative !important;
-    top: 0 !important;
     transform: translateX(0) !important;
     z-index: auto !important;
   }
 }
 
-/* Chat interface takes full remaining height */
-main {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  overflow: hidden;
-  flex: 1;
-}
-
-/* Smooth fade-in animation */
+/* ── Animations ──────────────────────────────────────────────────────────── */
 @keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@keyframes slideInLeft {
-  from {
-    opacity: 0;
-    transform: translateX(-100%);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
-
-@keyframes slideOutLeft {
-  from {
-    opacity: 1;
-    transform: translateX(0);
-  }
-  to {
-    opacity: 0;
-    transform: translateX(-100%);
-  }
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes spin-gentle {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
 }
 
 @keyframes pulse-subtle {
-  0%, 100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.5;
-  }
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.5; }
 }
 
-@keyframes fillBar {
-  from {
-    width: 0;
-  }
-  to {
-    width: var(--fill-width, 100%);
-  }
-}
+.animate-fade-in      { animation: fadeIn 0.3s ease-in-out; }
+.animate-spin-gentle  { animation: spin-gentle 2s linear infinite; }
+.animate-pulse-subtle { animation: pulse-subtle 2s ease-in-out infinite; }
 
-.animate-fade-in {
-  animation: fadeIn 0.3s ease-in-out;
-}
+/* ── Shadows ─────────────────────────────────────────────────────────────── */
+.shadow-soft    { box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08); }
+.shadow-soft-lg { box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12); }
 
-.animate-slide-in-left {
-  animation: slideInLeft 0.3s ease-out;
-}
+/* ── Scrollbar ───────────────────────────────────────────────────────────── */
+::-webkit-scrollbar       { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #f1f5f9; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
 
-.animate-slide-out-left {
-  animation: slideOutLeft 0.3s ease-in;
-}
-
-.animate-spin-gentle {
-  animation: spin-gentle 2s linear infinite;
-}
-
-.animate-pulse-subtle {
-  animation: pulse-subtle 2s ease-in-out infinite;
-}
-
-.animate-fill-bar {
-  animation: fillBar 1s ease-out forwards;
-}
-
-/* Soft shadow utilities */
-.shadow-soft {
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-}
-
-.shadow-soft-lg {
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12);
-}
-
-/* Custom scrollbar */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-::-webkit-scrollbar-track {
-  background: #f1f5f9;
-}
-
-::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
-  border-radius: 4px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
-}
-
-/* Smooth transitions */
-* {
-  transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
-}
-
-button {
-  transition: all 200ms ease;
-}
-
-/* Glass morphism effect */
-.glass {
-  background: rgba(255, 255, 255, 0.85);
-  backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.3);
-}
-
-/* Prevent unwanted transitions on transforms */
-.no-transition * {
-  transition: none !important;
-}
+/* ── Buttons ─────────────────────────────────────────────────────────────── */
+button { transition: background-color 150ms ease, color 150ms ease, opacity 150ms ease; }

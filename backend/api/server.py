@@ -2,7 +2,7 @@
 Requirements: fastapi, uvicorn
 Run with: uvicorn backend.api.server:app --reload --port 8000
 """
-
+from backend.scripts.symptom_extractor import SymptomExtractor
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import uuid
 import numpy as np
 import pandas as pd
 import xgboost as xgb
@@ -24,14 +25,26 @@ import xgboost as xgb
 sys.path.insert(0, str(Path(__file__).resolve().parents[0].parents[0] / "scripts"))
 from predict import predict_disease, build_model
 
+# ── Session Store ─────────────────────────────────────────────────────────────
+# In-memory session state: tracks confirmed symptoms and asked questions per session
+# Structure: { session_id: {"symptoms": [...], "asked_questions": [...]} }
+sessions: dict[str, dict] = {}
+
+# Maximum follow-up questions before stopping and returning final prediction
+# Hard stop: never ask more than 2 follow-up questions
+MAX_FOLLOWUP_QUESTIONS = 2
+
+# Confidence threshold: if top prediction >= this, stop asking questions
+# Range: 0.0–1.0 (0.35 = 35% confidence)
+# At 35% confidence, model is sufficiently certain to make a recommendation
+CONFIDENCE_THRESHOLD = 0.35
+
 
 # ── Request/Response Models ───────────────────────────────────────────────────
 class PredictRequest(BaseModel):
-    symptoms: Optional[list[str]] = None
     message: Optional[str] = None
-    asked_symptoms: list[str] = []
-    age: int = 30
-    gender: str = "male"
+    symptoms: Optional[list[str]] = None
+    session_id: Optional[str] = None
 
 
 class FollowupRequest(BaseModel):
@@ -40,6 +53,7 @@ class FollowupRequest(BaseModel):
     new_answer: dict  # e.g. {"chest_pain": 1}
     age: int = 30
     gender: str = "male"
+    session_id: Optional[str] = None
 
 
 class DiseaseResult(BaseModel):
@@ -54,13 +68,12 @@ class ExplanationFactor(BaseModel):
 
 
 class PredictResponse(BaseModel):
-    top_predictions: list[DiseaseResult]
-    confidence: str  # "HIGH", "MEDIUM", "LOW"
-    next_question: str | None  # e.g. "Do you have chest pain?"
-    next_symptom: str | None = None
-    question_source: str = "rules"
-    explanation: str | None = None
-    explanation_factors: list[ExplanationFactor] = []
+    detected_symptoms: list[str]
+    top_predictions: list[dict]
+    next_question: str | None
+    next_symptom_key: str | None = None  # Symptom key for the next question (helps frontend avoid extraction)
+    is_final: bool = False  # True if no more questions should be asked
+    session_id: Optional[str] = None
 
 
 # ── Follow-up Question Bank ───────────────────────────────────────────────────
@@ -115,6 +128,9 @@ SYMPTOM_QUESTION_MAP = {
     "back_pain": "Do you have back pain?",
     "skin_rash": "Do you have a skin rash?",
 }
+
+# ── REVERSE map: question text → symptom key (for strict matching) ──────────
+QUESTION_SYMPTOM_MAP = {v: k for k, v in SYMPTOM_QUESTION_MAP.items()}
 
 
 def load_env_file() -> None:
@@ -325,10 +341,11 @@ def generate_gemini_symptom_extraction(message: str) -> list[str]:
 
 
 def question_symptom(question: str) -> str | None:
-    for symptom, mapped_question in SYMPTOM_QUESTION_MAP.items():
-        if mapped_question == question:
-            return symptom
-    return None
+    """
+    Map a question text to its symptom key using STRICT matching.
+    Returns None if question is not in the map.
+    """
+    return QUESTION_SYMPTOM_MAP.get(question)
 
 
 def determine_confidence_level(top_confidence: float) -> str:
@@ -341,13 +358,55 @@ def determine_confidence_level(top_confidence: float) -> str:
         return "LOW"
 
 
+def should_stop_asking(top_confidence: float, num_asked: int) -> bool:
+    """
+    Determine if we should stop asking follow-up questions.
+    
+    Stops if:
+    1. Top prediction confidence >= CONFIDENCE_THRESHOLD, OR
+    2. Already asked MAX_FOLLOWUP_QUESTIONS
+    
+    Args:
+        top_confidence: Confidence of top prediction (0.0–1.0)
+        num_asked: Number of questions already asked
+        
+    Returns:
+        True if should stop asking, False otherwise
+    """
+    # Convert percentage to decimal if needed (e.g., 48 -> 0.48)
+    conf = top_confidence / 100 if top_confidence > 1 else top_confidence
+    
+    if conf >= CONFIDENCE_THRESHOLD:
+        print(f"[should_stop_asking] Confidence {conf:.2%} >= threshold {CONFIDENCE_THRESHOLD:.2%} → STOP")
+        return True
+    
+    if num_asked >= MAX_FOLLOWUP_QUESTIONS:
+        print(f"[should_stop_asking] Asked {num_asked} questions >= max {MAX_FOLLOWUP_QUESTIONS} → STOP")
+        return True
+    
+    print(f"[should_stop_asking] Confidence {conf:.2%} < threshold, asked {num_asked}/{MAX_FOLLOWUP_QUESTIONS} → CONTINUE")
+    return False
+
+
 def select_next_question(predicted_diseases: list[str], already_asked: set[str] = None) -> str | None:
     """
     Generate a follow-up question based on predicted diseases.
-    Prioritize questions related to the top predictions.
+    Uses STRICT symptom key matching to avoid repeats.
+    
+    Args:
+        predicted_diseases: List of disease names from predictions
+        already_asked: Set of symptom keys that have already been asked
+        
+    Returns:
+        Question text, or None if all questions exhausted
     """
     if already_asked is None:
         already_asked = set()
+
+    # Normalize the already_asked set to symptom keys
+    asked_keys = {normalize_symptom(item) for item in already_asked}
+    
+    print(f"[select_next_question] Already asked: {asked_keys}")
 
     # Disease-category mapping for smarter question selection
     disease_categories = {
@@ -379,22 +438,58 @@ def select_next_question(predicted_diseases: list[str], already_asked: set[str] 
         if category != "general":
             break
 
-    already_asked = {normalize_symptom(item) for item in already_asked}
+    print(f"[select_next_question] Predicted category: {category}")
 
-    # Select from category questions
-    questions = FOLLOWUP_QUESTIONS.get(category, FOLLOWUP_QUESTIONS["general"])
-    for question in questions:
-        symptom = question_symptom(question)
-        if question not in already_asked and symptom not in already_asked:
+    # Build list of questions for this category, in order
+    category_questions = FOLLOWUP_QUESTIONS.get(category, FOLLOWUP_QUESTIONS["general"])
+    
+    # Iterate through questions and return the first one whose symptom hasn't been asked
+    for question in category_questions:
+        symptom_key = question_symptom(question)
+        if symptom_key is None:
+            print(f"[select_next_question] WARNING: Question '{question}' has no symptom mapping!")
+            continue
+        if symptom_key not in asked_keys:
+            print(f"[select_next_question] Selected: '{question}' (symptom: {symptom_key})")
             return question
 
-    # Fallback to general questions
+    # Fallback: try general questions
+    print(f"[select_next_question] Category exhausted, trying general questions")
     for question in FOLLOWUP_QUESTIONS["general"]:
-        symptom = question_symptom(question)
-        if question not in already_asked and symptom not in already_asked:
+        symptom_key = question_symptom(question)
+        if symptom_key is None:
+            print(f"[select_next_question] WARNING: Question '{question}' has no symptom mapping!")
+            continue
+        if symptom_key not in asked_keys:
+            print(f"[select_next_question] Selected (fallback): '{question}' (symptom: {symptom_key})")
             return question
 
+    print(f"[select_next_question] No more questions available")
     return None
+
+
+def get_next_question(session: dict, predicted_diseases: list[str]) -> tuple[str | None, str | None]:
+    """
+    Return the next (question, symptom_key) that hasn't been asked yet in this session.
+    Delegates to select_next_question for disease-aware ordering, then falls back
+    to iterating SYMPTOM_QUESTION_MAP so we never repeat.
+    """
+    asked = set(session["asked_questions"])
+    confirmed = set(session["symptoms"])
+    excluded = asked | confirmed
+
+    # Try disease-aware selection first
+    fallback_q = select_next_question(predicted_diseases, excluded)
+    if fallback_q:
+        sym = question_symptom(fallback_q)
+        return fallback_q, sym
+
+    # Exhaustive fallback: walk every known symptom in order
+    for sym, question in SYMPTOM_QUESTION_MAP.items():
+        if sym not in excluded:
+            return question, sym
+
+    return None, None
 
 
 def build_feature_row(symptoms: list[str], age: int, gender: str, feature_cols: list[str]) -> tuple[pd.DataFrame, list[str]]:
@@ -590,61 +685,56 @@ async def lifespan(app: FastAPI):
 
 
 # ── FastAPI App ───────────────────────────────────────────────────────────────
+# ── FastAPI App ───────────────────────────────────────────────────────────────
 app = FastAPI(title="FairMed AI Disease Predictor", lifespan=lifespan)
 
-# Enable CORS for all origins (frontend will be on localhost:5173)
+# Enable CORS for frontend origin
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["*"], # This allows all origins and solves most local dev issues
+    allow_credentials=False, # Must be False if allow_origins is "*"
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
 # ── Endpoints ──────────────────────────────────────────────────────────────────
+def smart_extract(text: str) -> list[str]:
+    local_extractor = SymptomExtractor()
+    local_results = local_extractor.extract_and_score(text)
+
+    if not local_results:
+        return extract_symptoms_gemini(text)
+
+    avg_conf = sum(r['confidence'] for r in local_results) / len(local_results)
+
+    if avg_conf < 0.75:
+        try:
+            return extract_symptoms_gemini(text)
+        except:
+            return [r['symptom'] for r in local_results]
+
+    return [r['symptom'] for r in local_results]
+
+
 @app.post("/predict", response_model=PredictResponse)
 async def predict(request: PredictRequest):
     """
-    Predict diseases from symptoms.
-
-    Request:
-        symptoms: List of symptom strings (optional)
-        message: Free-text symptom description (optional)
-        age: Patient age (default 30)
-        gender: 'male' or 'female' (default 'male')
-        
-    Note: Provide either 'symptoms' list OR 'message', not both.
-
-    Response:
-        top_predictions: List of top-3 disease predictions with confidence
-        confidence: Confidence level (HIGH, MEDIUM, LOW)
-        next_question: Follow-up question to refine prediction, or None
+    Predict diseases from symptoms. Initializes a session for follow-up tracking.
     """
-
-    # Validate input - accept either symptoms list or free text message
-    symptoms_list = request.symptoms or []
-    
-    # If no symptoms but message provided, extract from text
-    if not symptoms_list and request.message:
-        symptoms_list = extract_symptoms_from_text(request.message)
-    
-    # Must have at least one symptom
-    if not symptoms_list or len(symptoms_list) == 0:
-        raise HTTPException(
-            status_code=400, 
-            detail="No symptoms provided. Send either 'symptoms' list or 'message' with symptom description."
-        )
+    if request.message:
+        symptoms = smart_extract(request.message)
+    elif request.symptoms:
+        symptoms = request.symptoms
+    else:
+        raise HTTPException(status_code=400, detail="No input")
 
     try:
-        # Get artifacts from app state
         artifacts = app.state.artifacts
 
-        # Call predict_disease
         predictions = predict_disease(
-            symptoms=symptoms_list,
-            age=request.age,
-            gender=request.gender,
+            symptoms=symptoms,
+            age=30,
+            gender="male",
             model=artifacts["model"],
             svd=artifacts["svd"],
             scaler=artifacts["scaler"],
@@ -654,53 +744,65 @@ async def predict(request: PredictRequest):
             top_k=3,
         )
 
-        # Check if at least one symptom matched
         if not predictions:
             raise HTTPException(
                 status_code=422,
                 detail="None of the provided symptoms were recognized",
             )
 
-        # Format predictions
-        formatted_predictions = [
-            DiseaseResult(disease=p["disease"], confidence=p["confidence"])
-            for p in predictions
-        ]
+        print(f"[/predict] Symptoms: {symptoms}")
+        print(f"[/predict] Predictions: {[(p['disease'], p['confidence']) for p in predictions]}")
 
-        # Determine confidence level
-        top_confidence = predictions[0]["confidence"]
-        confidence_level = determine_confidence_level(top_confidence)
+        # ── Initialize session ────────────────────────────────────────────────
+        session_id = request.session_id or str(uuid.uuid4())
+        sessions[session_id] = {
+            "symptoms": list(symptoms),
+            "asked_questions": [],
+        }
+        session = sessions[session_id]
 
-        # Generate next question based on top predictions
         predicted_disease_names = [p["disease"] for p in predictions]
-        already_asked = set(symptoms_list) | set(request.asked_symptoms)
-        fallback_question = select_next_question(predicted_disease_names, already_asked)
-        fallback_symptom = question_symptom(fallback_question) if fallback_question else None
-        gemini_question, gemini_symptom = generate_gemini_followup(
-            symptoms_list,
-            already_asked,
-            predictions,
-            fallback_question,
-        )
-        next_question = gemini_question or fallback_question
-        next_symptom = gemini_symptom or fallback_symptom
-        explanation, explanation_factors = explain_prediction(
-            symptoms_list,
-            request.age,
-            request.gender,
-            artifacts,
-            predictions,
-        )
+        
+        # ── Check if we should stop asking based on confidence ────────────────
+        top_confidence = predictions[0]["confidence"]
+        is_final = should_stop_asking(top_confidence, len(session["asked_questions"]))
+        
+        next_question = None
+        next_sym = None
+        
+        if not is_final:
+            # Only ask more questions if confidence is low
+            fallback_question, next_sym = get_next_question(session, predicted_disease_names)
 
-        return PredictResponse(
-            top_predictions=formatted_predictions,
-            confidence=confidence_level,
-            next_question=next_question,
-            next_symptom=next_symptom,
-            question_source="gemini" if gemini_question else "rules",
-            explanation=explanation,
-            explanation_factors=explanation_factors,
-        )
+            gemini_question, gemini_sym = generate_gemini_followup(
+                symptoms,
+                set(session["asked_questions"]) | set(session["symptoms"]),
+                predictions,
+                fallback_question,
+            )
+
+            if gemini_question and gemini_sym:
+                next_question = gemini_question
+                next_sym = gemini_sym
+            else:
+                next_question = fallback_question
+
+            # Record the question we're about to ask
+            if next_sym and next_sym not in session["asked_questions"]:
+                session["asked_questions"].append(next_sym)
+        else:
+            print(f"[/predict] Prediction is final, not asking more questions")
+
+        response = {
+            "detected_symptoms": symptoms,
+            "top_predictions": predictions,
+            "next_question": next_question,
+            "next_symptom_key": next_sym,  # Include symptom key to avoid frontend extraction errors
+            "is_final": is_final,
+        }
+        # Attach session_id so the frontend can send it back
+        response["session_id"] = session_id  # type: ignore[assignment]
+        return response
 
     except HTTPException:
         raise
@@ -712,49 +814,46 @@ async def predict(request: PredictRequest):
 async def followup(request: FollowupRequest):
     """
     Get updated predictions based on follow-up answer.
-
-    Request:
-        symptoms: Original list of symptom strings (optional)
-        message: Free-text symptom description (optional)
-        new_answer: Dict with newly confirmed symptom (e.g. {"chest_pain": 1})
-        age: Patient age
-        gender: Patient gender
-        
-    Note: Provide either 'symptoms' list OR 'message', not both.
-
-    Response:
-        Updated predictions with confidence and next question
+    Uses session memory to avoid repeating questions.
     """
+    # ── Resolve session ───────────────────────────────────────────────────────
+    session_id = request.session_id or "default"
+    session = sessions.get(session_id)
 
-    # Validate input - accept either symptoms list or free text message
-    symptoms_list = request.symptoms or []
-    
-    # If no symptoms but message provided, extract from text
-    if not symptoms_list and request.message:
-        symptoms_list = extract_symptoms_from_text(request.message)
-    
-    # Must have at least one symptom
-    if not symptoms_list or len(symptoms_list) == 0:
+    # Fallback: reconstruct session from request if not found
+    if session is None:
+        base_symptoms = list(request.symptoms or [])
+        if not base_symptoms and request.message:
+            base_symptoms = extract_symptoms_from_text(request.message)
+        session = {"symptoms": base_symptoms, "asked_questions": []}
+        sessions[session_id] = session
+
+    # ── Process the new answer ────────────────────────────────────────────────
+    if request.new_answer:
+        sym = list(request.new_answer.keys())[0]
+        print(f"[/followup] User answered about symptom: {sym}")
+        # Add to confirmed symptoms if answered yes (value == 1)
+        if request.new_answer[sym] == 1 and sym not in session["symptoms"]:
+            session["symptoms"].append(sym)
+            print(f"[/followup] Added to confirmed symptoms: {sym}")
+        # Always mark as asked so we never repeat it
+        if sym not in session["asked_questions"]:
+            session["asked_questions"].append(sym)
+            print(f"[/followup] Marked as asked: {sym}")
+        else:
+            print(f"[/followup] Already marked as asked: {sym}")
+
+    new_symptoms = list(session["symptoms"])
+
+    if not new_symptoms:
         raise HTTPException(
-            status_code=400, 
-            detail="No symptoms provided. Send either 'symptoms' list or 'message' with symptom description."
+            status_code=400,
+            detail="No symptoms available. Start a new conversation with /predict.",
         )
 
     try:
-        # Add new symptom to the list
-        new_symptoms = list(symptoms_list)
-        
-        # Extract the symptom name from new_answer
-        # new_answer format: {"symptom_name": 1}
-        if request.new_answer:
-            new_sym = list(request.new_answer.keys())[0]
-            if request.new_answer[new_sym] == 1 and new_sym not in new_symptoms:
-                new_symptoms.append(new_sym)
-
-        # Get artifacts from app state
         artifacts = app.state.artifacts
 
-        # Call predict_disease with updated symptoms
         predictions = predict_disease(
             symptoms=new_symptoms,
             age=request.age,
@@ -768,53 +867,56 @@ async def followup(request: FollowupRequest):
             top_k=3,
         )
 
-        # Check if at least one symptom matched
         if not predictions:
             raise HTTPException(
                 status_code=422,
                 detail="None of the provided symptoms were recognized",
             )
 
-        # Format predictions
-        formatted_predictions = [
-            DiseaseResult(disease=p["disease"], confidence=p["confidence"])
-            for p in predictions
-        ]
+        print(f"[/followup] Symptoms: {new_symptoms}")
+        print(f"[/followup] Asked so far: {session['asked_questions']}")
+        print(f"[/followup] Predictions: {[(p['disease'], p['confidence']) for p in predictions]}")
 
-        # Determine confidence level
-        top_confidence = predictions[0]["confidence"]
-        confidence_level = determine_confidence_level(top_confidence)
-
-        # Generate next question (avoid previous symptoms)
         predicted_disease_names = [p["disease"] for p in predictions]
-        already_asked = set(symptoms_list) | set(request.new_answer.keys())
-        fallback_question = select_next_question(predicted_disease_names, already_asked)
-        fallback_symptom = question_symptom(fallback_question) if fallback_question else None
-        gemini_question, gemini_symptom = generate_gemini_followup(
-            new_symptoms,
-            already_asked,
-            predictions,
-            fallback_question,
-        )
-        next_question = gemini_question or fallback_question
-        next_symptom = gemini_symptom or fallback_symptom
-        explanation, explanation_factors = explain_prediction(
-            new_symptoms,
-            request.age,
-            request.gender,
-            artifacts,
-            predictions,
-        )
 
-        return PredictResponse(
-            top_predictions=formatted_predictions,
-            confidence=confidence_level,
+        # ── Check if we should stop asking based on confidence ────────────────
+        top_confidence = predictions[0]["confidence"]
+        is_final = should_stop_asking(top_confidence, len(session["asked_questions"]))
+        
+        next_question = None
+        next_sym = None
+        
+        if not is_final:
+            # Only ask more questions if confidence is low
+            fallback_question, next_sym = get_next_question(session, predicted_disease_names)
+
+            gemini_question, gemini_sym = generate_gemini_followup(
+                new_symptoms,
+                set(session["asked_questions"]) | set(session["symptoms"]),
+                predictions,
+                fallback_question,
+            )
+
+            if gemini_question and gemini_sym:
+                next_question = gemini_question
+                next_sym = gemini_sym
+            else:
+                next_question = fallback_question
+
+            # Record the question we're about to ask
+            if next_sym and next_sym not in session["asked_questions"]:
+                session["asked_questions"].append(next_sym)
+        else:
+            print(f"[/followup] Prediction is final, not asking more questions")
+
+        response = PredictResponse(
+            detected_symptoms=new_symptoms,
+            top_predictions=predictions,
             next_question=next_question,
-            next_symptom=next_symptom,
-            question_source="gemini" if gemini_question else "rules",
-            explanation=explanation,
-            explanation_factors=explanation_factors,
+            next_symptom_key=next_sym,  # Include symptom key to avoid frontend extraction errors
+            is_final=is_final,
         )
+        return response
 
     except HTTPException:
         raise
@@ -826,6 +928,31 @@ async def followup(request: FollowupRequest):
 async def health():
     """Health check endpoint."""
     return {"status": "ok"}
+
+
+def test_bias():
+    """Basic bias check: compare predictions for same symptoms across genders."""
+    artifacts = None
+    try:
+        built = build_model()
+        artifacts = {
+            "model": built[0], "svd": built[1], "scaler": built[2],
+            "le": built[3], "feature_cols": built[4], "original_classes": built[5],
+        }
+    except Exception as e:
+        print(f"[test_bias] Could not load model: {e}")
+        return
+
+    symptoms = ["fever", "cough"]
+    for gender in ("male", "female"):
+        preds = predict_disease(
+            symptoms=symptoms, age=30, gender=gender,
+            model=artifacts["model"], svd=artifacts["svd"],
+            scaler=artifacts["scaler"], le=artifacts["le"],
+            feature_cols=artifacts["feature_cols"],
+            original_classes=artifacts["original_classes"], top_k=3,
+        )
+        print(f"[test_bias] {gender.capitalize()}: {[(p['disease'], round(p['confidence'], 1)) for p in preds]}")
 
 
 if __name__ == "__main__":

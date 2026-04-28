@@ -70,12 +70,12 @@ function parseInitialSymptoms(query) {
 }
 
 // ── API HELPER ──────────────────────────────────────────────────────────────
-async function callPredictAPI(symptoms, age, gender, askedSymptoms = []) {
+async function callPredictAPI(message) {
   try {
     const res = await fetch('http://localhost:8000/predict', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symptoms, age, gender, asked_symptoms: askedSymptoms })
+      body: JSON.stringify({ message })
     });
     if (!res.ok) throw new Error('Prediction failed');
     return await res.json();
@@ -94,6 +94,7 @@ export default function SymptomChecker({ initialQuery, onResults }) {
   const [askedSymptoms, setAskedSymptoms] = useState(() => new Set(initialSymptoms));
   const [currentQuestion, setCurrentQuestion] = useState(null);
   const [answerHistory, setAnswerHistory] = useState([]);
+  const [fullStory, setFullStory] = useState(initialQuery || '');
   const chatEndRef = useRef(null);
 
   // Scroll to latest chat message
@@ -105,31 +106,34 @@ export default function SymptomChecker({ initialQuery, onResults }) {
     return ALL_QUESTIONS.find(q => !asked.has(q.symptom)) || null;
   };
 
-  const getNextQuestion = async (symptoms, asked) => {
+  const getNextQuestion = async (story) => {
     try {
-      const data = await callPredictAPI(symptoms, age, gender, [...asked]);
-      if (data.next_question && data.next_symptom && !asked.has(data.next_symptom)) {
+      const data = await callPredictAPI(story);
+      // We also update our local confirmed symptoms based on the backend extraction
+      if (data.detected_symptoms) {
+          setConfirmedSymptoms(data.detected_symptoms);
+      }
+      if (data.next_question) {
         return {
-          symptom: data.next_symptom,
           question: data.next_question,
-          source: data.question_source
+          // Extract symptom keyword if possible
+          symptom: data.next_question.toLowerCase().match(/chest pain|fever|cough|headache|fatigue|nausea|dizzy|dizziness|vomiting|shortness of breath|diarrhea/)?.[0]?.replace(/ /g, '_') || 'unknown'
         };
       }
     } catch {
-      // Fall back to the local curated list when the model cannot answer yet.
+      // API failure or 422
     }
-    return getFallbackNextQuestion(asked);
+    return getFallbackNextQuestion(askedSymptoms);
   };
 
   const startQuestioning = async () => {
-    const next = await getNextQuestion(confirmedSymptoms, askedSymptoms);
+    // initial query is handled when start is clicked
+    const next = await getNextQuestion(fullStory);
     setCurrentQuestion(next);
     setPhase('questioning');
     setAnswerHistory([{
       type: 'system',
-      text: next?.source === 'gemini'
-        ? "I'll use AI-guided follow-up questions to narrow things down."
-        : "I'll ask a few quick yes/no questions to help narrow things down."
+      text: "I'll use AI-guided follow-up questions to narrow things down."
     }]);
   };
 
@@ -146,36 +150,36 @@ export default function SymptomChecker({ initialQuery, onResults }) {
     ];
     setAnswerHistory(newHistory);
 
-    let newSymptoms = [...confirmedSymptoms];
+    let newStory = fullStory;
     if (answer) {
-      newSymptoms = [...newSymptoms, currentQuestion.symptom];
-      setConfirmedSymptoms(newSymptoms);
+      newStory = `${fullStory}. Yes, I have ${currentQuestion.symptom.replace(/_/g, ' ')}`;
+    } else {
+      newStory = `${fullStory}. No, I do not have ${currentQuestion.symptom.replace(/_/g, ' ')}`;
     }
+    setFullStory(newStory);
 
     const questionsAsked = newHistory.filter(h => h.type === 'question').length;
-    const shouldStop =
-      newSymptoms.length >= MIN_SYMPTOMS_TO_PREDICT &&
-      questionsAsked >= MAX_QUESTIONS;
+    // We don't rely on strict symptom count since backend does it, just stop after 10 questions
+    const shouldStop = questionsAsked >= MAX_QUESTIONS;
 
     if (shouldStop) {
       setPhase('loading');
       setAnswerHistory([...newHistory, {
         type: 'system',
-        text: `Analyzing ${newSymptoms.length} symptoms...`
+        text: `Analyzing your responses...`
       }]);
 
       try {
-        const data = await callPredictAPI(newSymptoms, age, gender, [...newAsked]);
-        // Format predictions from API response
-        const formatted = data.top_predictions.map(p => ({
+        const data = await callPredictAPI(newStory);
+        const formatted = (data.top_predictions || []).map(p => ({
           disease: p.disease,
           confidence: Math.round(p.confidence)
         }));
-        onResults(formatted, newSymptoms, age, gender, {
-          explanation: data.explanation,
-          factors: data.explanation_factors || [],
+        onResults(formatted, data.detected_symptoms || confirmedSymptoms, age, gender, {
+          explanation: null,
+          factors: [],
           nextQuestion: data.next_question,
-          questionSource: data.question_source
+          questionSource: 'gemini'
         });
         setPhase('results');
       } catch {
@@ -186,8 +190,28 @@ export default function SymptomChecker({ initialQuery, onResults }) {
         }]);
       }
     } else {
-      const next = await getNextQuestion(newSymptoms, newAsked);
-      setCurrentQuestion(next);
+      const next = await getNextQuestion(newStory);
+      if (!next) {
+          setPhase('loading');
+          try {
+            const data = await callPredictAPI(newStory);
+            const formatted = (data.top_predictions || []).map(p => ({
+              disease: p.disease,
+              confidence: Math.round(p.confidence)
+            }));
+            onResults(formatted, data.detected_symptoms || confirmedSymptoms, age, gender, {
+              explanation: null,
+              factors: [],
+              nextQuestion: null,
+              questionSource: 'gemini'
+            });
+            setPhase('results');
+          } catch {
+            setPhase('error');
+          }
+      } else {
+          setCurrentQuestion(next);
+      }
     }
   };
 

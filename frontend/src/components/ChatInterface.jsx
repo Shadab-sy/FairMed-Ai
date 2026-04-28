@@ -1,267 +1,318 @@
 import { useState, useEffect, useRef } from 'react';
-import { Send, Loader } from 'lucide-react';
+import { Send, Loader, RefreshCw, User } from 'lucide-react';
 
 const INITIAL_MESSAGE = {
   role: 'assistant',
-  text: "Hi! I'm here to help you figure out what might be going on. Let's start with your main symptoms. What are you experiencing?"
+  text: "Hi! I'm here to help figure out what might be going on. Describe your symptoms and I'll give you an immediate assessment.",
 };
 
-export default function ChatInterface({ onResults }) {
+const SYMPTOM_KEYWORDS = {
+  'chest pain': 'burning_chest_pain',
+  'chest discomfort': 'burning_chest_pain',
+  'fever': 'fever',
+  'cough': 'cough',
+  'headache': 'headache',
+  'fatigue': 'fatigue',
+  'tired': 'fatigue',
+  'nausea': 'nausea',
+  'nauseous': 'nausea',
+  'dizziness': 'dizziness',
+  'dizzy': 'dizziness',
+  'vomiting': 'vomiting',
+  'shortness of breath': 'shortness_of_breath',
+  'diarrhea': 'diarrhea',
+  'sweating': 'sweating',
+  'back pain': 'back_pain',
+  'joint pain': 'joint_pain',
+  'skin rash': 'skin_rash',
+  'sore throat': 'throat_soreness',
+  'loss of appetite': 'loss_of_appetite',
+  'insomnia': 'insomnia',
+};
+
+function extractSymptomFromText(text) {
+  const lower = text.toLowerCase();
+  for (const [phrase, key] of Object.entries(SYMPTOM_KEYWORDS)) {
+    if (lower.includes(phrase)) return key;
+  }
+  return null;
+}
+
+function isYesAnswer(text) {
+  return /^(yes|yeah|yep|yup|y|sure|correct|true|1|absolutely|definitely|indeed)$/i.test(text.trim());
+}
+
+function isNoAnswer(text) {
+  return /^(no|nope|nah|n|not|false|0|never|negative)$/i.test(text.trim());
+}
+
+// ── Setup screen shown before the first message ───────────────────────────
+function SetupScreen({ onStart }) {
+  const [ageInput, setAgeInput] = useState('');
+  const [genderInput, setGenderInput] = useState('');
+  const [error, setError] = useState('');
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    const parsedAge = parseInt(ageInput, 10);
+    if (!ageInput || isNaN(parsedAge) || parsedAge < 1 || parsedAge > 120) {
+      setError('Please enter a valid age between 1 and 120.');
+      return;
+    }
+    if (!genderInput) {
+      setError('Please select a gender.');
+      return;
+    }
+    onStart(parsedAge, genderInput);
+  };
+
+  return (
+    <div className="flex flex-col h-full bg-slate-50 items-center justify-center p-6">
+      <div className="w-full max-w-sm bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-5">
+
+        {/* Header */}
+        <div className="flex items-center gap-3">
+          <div className="bg-indigo-100 rounded-full p-2">
+            <User size={20} className="text-indigo-600" />
+          </div>
+          <div>
+            <h2 className="text-base font-bold text-slate-900">Before we start</h2>
+            <p className="text-xs text-slate-500">Helps the model give accurate predictions</p>
+          </div>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {/* Age */}
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
+              Age
+            </label>
+            <input
+              type="number"
+              min="1"
+              max="120"
+              value={ageInput}
+              onChange={(e) => { setAgeInput(e.target.value); setError(''); }}
+              placeholder="e.g. 34"
+              className="w-full px-4 py-2.5 border border-slate-300 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+            />
+          </div>
+
+          {/* Gender */}
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 mb-1.5 uppercase tracking-wide">
+              Biological sex
+            </label>
+            <div className="flex gap-2">
+              {['male', 'female'].map((g) => (
+                <button
+                  key={g}
+                  type="button"
+                  onClick={() => { setGenderInput(g); setError(''); }}
+                  className={`flex-1 py-2.5 rounded-xl text-sm font-semibold capitalize transition-colors border ${
+                    genderInput === g
+                      ? 'bg-indigo-600 text-white border-indigo-600'
+                      : 'bg-white text-slate-600 border-slate-300 hover:border-indigo-400 hover:text-indigo-600'
+                  }`}
+                >
+                  {g}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {error && (
+            <p className="text-xs text-red-500">{error}</p>
+          )}
+
+          <button
+            type="submit"
+            className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold rounded-xl transition-colors"
+          >
+            Start Assessment
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ── Main chat component ───────────────────────────────────────────────────
+export default function ChatInterface({ onResults, onStartNew }) {
+  const [phase, setPhase] = useState('setup'); // 'setup' | 'chat'
+  const [age, setAge] = useState(null);
+  const [gender, setGender] = useState(null);
+
   const [messages, setMessages] = useState([INITIAL_MESSAGE]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [confirmedSymptoms, setConfirmedSymptoms] = useState([]);
-  const [age, setAge] = useState(30);
-  const [gender, setGender] = useState('male');
-  const [askedSymptoms, setAskedSymptoms] = useState(new Set());
   const [nextQuestion, setNextQuestion] = useState(null);
   const [nextSymptom, setNextSymptom] = useState(null);
-  const [predictions, setPredictions] = useState(null);
+  const [sessionId, setSessionId] = useState(null);
+  const [isDone, setIsDone] = useState(false);
+  const [isFinal, setIsFinal] = useState(false);
   const chatEndRef = useRef(null);
 
-  // Scroll to bottom on new messages
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const scrollToBottom = () => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  const handleSetupComplete = (parsedAge, selectedGender) => {
+    setAge(parsedAge);
+    setGender(selectedGender);
+    setPhase('chat');
   };
 
-  const callPredictAPI = async (symptoms, message = null) => {
-    try {
-      const payload = {
+  const callPredictAPI = async (message) => {
+    const res = await fetch('http://localhost:8000/predict', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, age, gender }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const e = new Error(err.detail || 'Prediction failed');
+      e.status = res.status;
+      throw e;
+    }
+    return res.json();
+  };
+
+  const callFollowupAPI = async (sid, symptomKey, answered) => {
+    const res = await fetch('http://localhost:8000/followup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sid,
+        new_answer: { [symptomKey]: answered ? 1 : 0 },
         age,
         gender,
-        asked_symptoms: Array.from(askedSymptoms)
-      };
-      
-      if (message) {
-        payload.message = message;
-      } else {
-        payload.symptoms = symptoms;
-      }
-
-      const res = await fetch('http://localhost:8000/predict', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      if (!res.ok) {
-        const errorData = await res.json().catch(() => ({}));
-        const error = new Error(errorData.detail || 'Prediction failed');
-        error.status = res.status;
-        error.detail = errorData.detail;
-        throw error;
-      }
-
-      return await res.json();
-    } catch (err) {
-      console.error('API error:', err);
-      throw err;
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const e = new Error(err.detail || 'Followup failed');
+      e.status = res.status;
+      throw e;
     }
+    return res.json();
   };
 
-  const callFollowupAPI = async (symptoms, newAnswer, message = null) => {
-    try {
-      const payload = {
-        new_answer: newAnswer,
-        age,
-        gender
-      };
+  const handleResponse = (data) => {
+    const symptoms = data.detected_symptoms || confirmedSymptoms;
+    if (data.detected_symptoms) setConfirmedSymptoms(data.detected_symptoms);
 
-      if (message) {
-        payload.message = message;
-      } else {
-        payload.symptoms = symptoms;
-      }
-
-      const res = await fetch('http://localhost:8000/followup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      if (!res.ok) {
-        const errorData = await res.json().catch(() => ({}));
-        const error = new Error(errorData.detail || 'Followup failed');
-        error.status = res.status;
-        error.detail = errorData.detail;
-        throw error;
-      }
-
-      return await res.json();
-    } catch (err) {
-      console.error('API error:', err);
-      throw err;
+    if (data.top_predictions?.length && onResults) {
+      onResults(data, symptoms, age, gender);
     }
-  };
 
-  const normalizeSymptom = (symptom) => {
-    return symptom.toLowerCase().trim().replace(/\s+/g, '_').replace(/-/g, '_');
-  };
+    // Check if prediction is final (high confidence or max questions reached)
+    const isFinalPrediction = data.is_final || false;
+    setIsFinal(isFinalPrediction);
 
-  const parseInitialSymptoms = (text) => {
-    return text
-      .toLowerCase()
-      .replace(/[,/]+/g, ' ')
-      .replace(/\b(and|with|also|plus|alongside|having)\b/g, ' ')
-      .split(/\s+/)
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .map((part) => normalizeSymptom(part))
-      .filter((part, index, all) => all.indexOf(part) === index);
+    if (data.next_question && !isFinalPrediction) {
+      // Use symptom key from backend (more reliable than extracting from question)
+      const sym = data.next_symptom_key || extractSymptomFromText(data.next_question);
+      setNextSymptom(sym);
+      setNextQuestion(data.next_question);
+      setIsDone(false);
+      setMessages((prev) => [...prev, { role: 'assistant', text: data.next_question }]);
+    } else {
+      setNextQuestion(null);
+      setNextSymptom(null);
+      setIsDone(true);
+      const finalMessage = isFinalPrediction
+        ? "Based on your symptoms, this is the most likely condition. You can start a new check or refine your symptoms."
+        : "That's all I need. Your results are shown on the right.";
+      setMessages((prev) => [
+        ...prev,
+        { role: 'assistant', text: finalMessage },
+      ]);
+    }
   };
 
   const handleSendMessage = async () => {
-    if (!inputValue.trim() || isLoading) return;
+    if (!inputValue.trim() || isLoading || isDone) return;
 
     const userMessage = inputValue.trim();
     setInputValue('');
     setIsLoading(true);
-
-    // Add user message to chat
     setMessages((prev) => [...prev, { role: 'user', text: userMessage }]);
 
+    const isFirstTurn = sessionId === null;
+
     try {
-      // First turn - user provides initial symptoms
-      if (confirmedSymptoms.length === 0) {
-        const parsedSymptoms = parseInitialSymptoms(userMessage);
-        if (parsedSymptoms.length === 0) {
-          setMessages((prev) => [
-            ...prev,
-            {
-              role: 'assistant',
-              text: 'I didn\'t quite catch that. Could you tell me your main symptoms? For example: fever, cough, headache, etc.'
-            }
-          ]);
-          setIsLoading(false);
-          return;
-        }
+      let data;
 
-        let data;
-        try {
-          // Try with parsed symptoms first
-          data = await callPredictAPI(parsedSymptoms);
-        } catch (err) {
-          // If 422 error (symptoms not recognized), retry with message format
-          if (err.status === 422) {
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: 'assistant',
-                text: 'I had trouble understanding those symptoms. Please describe them in more detail, like "I have a fever and cough" or "feeling tired with a headache".'
-              }
-            ]);
-            setIsLoading(false);
-            return;
-          }
-          throw err;
-        }
-
-        setConfirmedSymptoms(parsedSymptoms);
-        const newAskedSymptoms = new Set(parsedSymptoms);
-        setAskedSymptoms(newAskedSymptoms);
-        setPredictions(data);
-
-        if (data.next_question) {
-          setNextQuestion(data.next_question);
-          setNextSymptom(data.next_symptom);
-          setMessages((prev) => [
-            ...prev,
-            { role: 'assistant', text: data.next_question }
-          ]);
-        } else {
-          // No more questions
-          setMessages((prev) => [
-            ...prev,
-            {
-              role: 'assistant',
-              text: 'Based on your symptoms, here are the possible conditions.'
-            }
-          ]);
-          if (data.top_predictions && onResults) {
-            onResults(data, parsedSymptoms, age, gender);
-          }
-        }
+      if (isFirstTurn) {
+        data = await callPredictAPI(userMessage);
+        if (data.session_id) setSessionId(data.session_id);
       } else {
-        // Follow-up turns - user answers yes/no or provides more info
-        const isYes = /^(yes|yeah|yep|y|true|1)$/i.test(userMessage);
-        const isNo = /^(no|nope|n|false|0)$/i.test(userMessage);
+        let symKey = nextSymptom;
+        let answered;
 
-        if (!isYes && !isNo) {
+        if (isYesAnswer(userMessage)) {
+          answered = true;
+        } else if (isNoAnswer(userMessage)) {
+          answered = false;
+        } else {
+          const extracted = extractSymptomFromText(userMessage);
+          if (extracted) {
+            symKey = extracted;
+            answered = true;
+          } else {
+            answered = true;
+          }
+        }
+
+        if (!symKey && nextSymptom) symKey = nextSymptom;
+
+        if (!symKey) {
           setMessages((prev) => [
             ...prev,
-            {
-              role: 'assistant',
-              text: 'Please answer with "yes" or "no" to help me narrow down the diagnosis.'
-            }
+            { role: 'assistant', text: nextQuestion || 'Could you clarify your answer?' },
           ]);
           setIsLoading(false);
           return;
         }
 
-        // Process the answer
-        const updatedAskedSymptoms = new Set([...askedSymptoms, nextSymptom]);
-        setAskedSymptoms(updatedAskedSymptoms);
-
-        let updatedSymptoms = [...confirmedSymptoms];
-        if (isYes) {
-          updatedSymptoms.push(nextSymptom);
-          setConfirmedSymptoms(updatedSymptoms);
-        }
-
-        // Call followup API
-        const newAnswer = { [nextSymptom]: isYes ? 1 : 0 };
-        const data = await callFollowupAPI(confirmedSymptoms, newAnswer);
-        setPredictions(data);
-
-        if (data.next_question && data.next_symptom) {
-          setNextQuestion(data.next_question);
-          setNextSymptom(data.next_symptom);
-          setMessages((prev) => [
-            ...prev,
-            { role: 'assistant', text: data.next_question }
-          ]);
-        } else {
-          setMessages((prev) => [
-            ...prev,
-            {
-              role: 'assistant',
-              text: 'Based on everything you\'ve shared, here are the most likely conditions.'
-            }
-          ]);
-          if (data.top_predictions && onResults) {
-            onResults(data, updatedSymptoms, age, gender);
-          }
-        }
+        data = await callFollowupAPI(sessionId, symKey, answered);
       }
+
+      handleResponse(data);
     } catch (err) {
-      console.error('Error:', err);
-      
-      // Handle 422 errors specifically
+      console.error('Chat error:', err);
       if (err.status === 422) {
         setMessages((prev) => [
           ...prev,
-          {
-            role: 'assistant',
-            text: 'I couldn\'t recognize those symptoms. Please describe them like:\n• "I have a fever and cough"\n• "I\'m experiencing fatigue and headache"\n• "feeling tired, dizzy, and nauseous"'
-          }
+          { role: 'assistant', text: "I couldn't pick up any symptoms. Try: 'I have a fever and cough'." },
         ]);
+        if (isFirstTurn) setSessionId(null);
       } else {
         setMessages((prev) => [
           ...prev,
-          {
-            role: 'assistant',
-            text: 'Sorry, I encountered an error. Please try again.'
-          }
+          { role: 'assistant', text: 'Connection error. Please try again.' },
         ]);
       }
     } finally {
       setIsLoading(false);
-      scrollToBottom();
     }
+  };
+
+  const handleReset = () => {
+    setPhase('setup');
+    setAge(null);
+    setGender(null);
+    setMessages([INITIAL_MESSAGE]);
+    setConfirmedSymptoms([]);
+    setNextQuestion(null);
+    setNextSymptom(null);
+    setSessionId(null);
+    setIsDone(false);
+    setIsFinal(false);
+    setInputValue('');
+    if (onStartNew) onStartNew();
   };
 
   const handleKeyDown = (e) => {
@@ -271,32 +322,52 @@ export default function ChatInterface({ onResults }) {
     }
   };
 
+  // ── Setup screen ────────────────────────────────────────────────────────
+  if (phase === 'setup') {
+    return <SetupScreen onStart={handleSetupComplete} />;
+  }
+
+  // ── Chat screen ─────────────────────────────────────────────────────────
+  const placeholder = isDone
+    ? 'Assessment complete'
+    : isFinal
+    ? 'Prediction is final'
+    : sessionId === null
+    ? "Describe your symptoms (e.g. 'fever, cough, headache')..."
+    : 'Reply yes / no, or describe how you feel...';
+
   return (
     <div className="flex flex-col h-full bg-slate-50">
-      {/* Messages Container */}
-      <div className="flex-1 overflow-y-auto p-6 space-y-4">
+
+      {/* Patient badge */}
+      <div className="flex items-center gap-2 px-4 py-2 bg-white border-b border-slate-100">
+        <span className="text-xs text-slate-500">Patient:</span>
+        <span className="text-xs font-semibold text-slate-700">Age {age}</span>
+        <span className="text-xs text-slate-400">·</span>
+        <span className="text-xs font-semibold text-slate-700 capitalize">{gender}</span>
+        <button
+          onClick={handleReset}
+          className="ml-auto text-xs text-indigo-500 hover:text-indigo-700 font-medium transition-colors"
+        >
+          Change
+        </button>
+      </div>
+
+      {/* Messages */}
+      <div className="chat-messages">
         {messages.map((msg, idx) => (
-          <div
-            key={idx}
-            className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-          >
-            <div
-              className={`max-w-xs lg:max-w-md xl:max-w-lg px-4 py-3 rounded-lg ${
-                msg.role === 'user'
-                  ? 'bg-indigo-600 text-white rounded-br-none'
-                  : 'bg-white text-slate-900 border border-slate-200 rounded-bl-none'
-              }`}
-            >
-              <p className="text-sm leading-relaxed">{msg.text}</p>
+          <div key={idx} className={`msg-row ${msg.role === 'user' ? 'user' : 'bot'}`}>
+            <div className="chat-bubble">
+              {msg.text}
             </div>
           </div>
         ))}
 
         {isLoading && (
-          <div className="flex justify-start">
-            <div className="bg-white text-slate-900 border border-slate-200 rounded-lg rounded-bl-none px-4 py-3 flex items-center gap-2">
-              <Loader size={16} className="animate-spin text-indigo-600" />
-              <span className="text-sm text-slate-600">Thinking...</span>
+          <div className="msg-row bot">
+            <div className="chat-bubble loading">
+              <Loader size={14} className="animate-spin text-indigo-400" />
+              <span>Analyzing…</span>
             </div>
           </div>
         )}
@@ -304,29 +375,34 @@ export default function ChatInterface({ onResults }) {
         <div ref={chatEndRef} />
       </div>
 
-      {/* Input Area */}
-      <div className="border-t border-slate-200 bg-white p-6">
-        <div className="flex gap-3">
+      {/* Input */}
+      <div className="border-t border-slate-200 bg-white p-4">
+        <div className="flex gap-2">
           <input
             type="text"
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={
-              confirmedSymptoms.length === 0
-                ? "Tell me your symptoms (e.g., 'fever, cough, headache')..."
-                : "Answer with 'yes' or 'no'..."
-            }
-            disabled={isLoading}
-            className="flex-1 px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent disabled:bg-slate-100 disabled:cursor-not-allowed text-slate-900 placeholder-slate-500"
+            placeholder={placeholder}
+            disabled={isLoading || isDone || isFinal}
+            className="flex-1 px-4 py-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent disabled:bg-slate-100 disabled:cursor-not-allowed text-slate-900 placeholder-slate-400 text-sm"
           />
-          <button
-            onClick={handleSendMessage}
-            disabled={isLoading || !inputValue.trim()}
-            className="px-4 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-          >
-            <Send size={18} />
-          </button>
+          {isDone || isFinal ? (
+            <button
+              onClick={handleReset}
+              className="px-4 py-3 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl font-medium transition-colors flex items-center gap-2 text-sm"
+            >
+              <RefreshCw size={16} /> New
+            </button>
+          ) : (
+            <button
+              onClick={handleSendMessage}
+              disabled={isLoading || !inputValue.trim()}
+              className="px-4 py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Send size={16} />
+            </button>
+          )}
         </div>
       </div>
     </div>
